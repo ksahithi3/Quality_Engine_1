@@ -1,18 +1,19 @@
 """
 DOCUMENT QUALITY CALCULATOR
-10 parameters for ALL document types + overall quality score.
+11 parameters for ALL document types + overall quality score.
 
 Parameters:
-  1.  Blur               — overall image sharpness (OpenCV)
-  2.  Contrast           — light vs dark difference (OpenCV)
-  3.  Brightness         — overall lightness/darkness (OpenCV)
-  4.  Resolution         — pixel dimensions (OpenCV + PyMuPDF)
-  5.  DPI                — dots per inch (PyMuPDF + Pillow)
-  6.  Noise              — image graininess (Gaussian difference method)
-  7.  Skew Angle         — how tilted the document is (OpenCV)
-  8.  Shadow Coverage    — % covered by shadow (OpenCV)
-  9.  Orientation        — portrait or landscape (OpenCV)
-  10. Text Clarity       — sharpness of text/detail edges (OpenCV)
+  1.  Blur                    — overall image sharpness (OpenCV)
+  2.  Contrast                — light vs dark difference (OpenCV)
+  3.  Brightness              — overall lightness/darkness (OpenCV)
+  4.  Resolution              — pixel dimensions (OpenCV + PyMuPDF)
+  5.  DPI                     — dots per inch (Pillow metadata, min of x/y)
+  6.  Noise                   — image graininess (Gaussian difference method)
+  7.  Skew Angle              — how tilted the document is (OpenCV)
+  8.  Shadow Coverage         — % covered by shadow (OpenCV)
+  9.  Orientation             — portrait or landscape (OpenCV)
+  10. Text Clarity            — sharpness of text/detail edges (OpenCV)
+  11. Perspective Distortion  — trapezoid warp from angled phone capture (OpenCV homography)
 
 INSTALL:
   pip install opencv-python numpy pillow pymupdf
@@ -93,55 +94,34 @@ def calculate_resolution(file_path, img):
 
 # ════════════════════════════════════════════════════════
 # PARAMETER 5 — DPI
-# PDFs → extract from embedded image metadata
-# Images → EXIF first, then estimate from resolution
+#
+# Method  : Embedded metadata — min(dpi_x, dpi_y)
+# Adapted from boss's _check_dpi approach.
+#
+# Logic:
+#   • Read DPI from image metadata via Pillow
+#   • Take the MINIMUM of x and y DPI — conservative,
+#     always reflects the worse axis
+#   • If metadata is missing → defaults to (72, 72)
+#   • If Pillow can't open the file → returns 72
+#
+# Note: For PDFs, load_as_image() already renders the page
+#       as a PIL/numpy image at 2x zoom, so Pillow reads
+#       whatever DPI the PDF metadata carries.
 # ════════════════════════════════════════════════════════
 def calculate_dpi(file_path, img):
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == '.pdf':
-        try:
-            doc        = fitz.open(file_path)
-            page       = doc[0]
-            image_list = page.get_images(full=True)
-            if image_list:
-                for img_info in image_list:
-                    xref       = img_info[0]
-                    base_image = doc.extract_image(xref)
-                    if base_image:
-                        img_w     = base_image.get("width", 0)
-                        img_h     = base_image.get("height", 0)
-                        page_w_in = page.rect.width / 72
-                        page_h_in = page.rect.height / 72
-                        if page_w_in > 0 and img_w > 0:
-                            dpi_w = round(img_w / page_w_in)
-                            dpi_h = round(img_h / page_h_in) if page_h_in > 0 else dpi_w
-                            return round((dpi_w + dpi_h) / 2)
-        except:
-            pass
-        return 144
-    else:
-        try:
-            img_pil = Image.open(file_path)
-            dpi     = img_pil.info.get('dpi', None)
-            if dpi and dpi[0] > 72:
-                return int(dpi[0])
-        except:
-            pass
-        h, w   = img.shape[:2]
-        aspect = max(w, h) / min(w, h)
-        if 1.38 <= aspect <= 1.45:
-            long_in, short_in = 11.69, 8.27
-        elif 1.27 <= aspect <= 1.35:
-            long_in, short_in = 11.0, 8.5
-        else:
-            long_in, short_in = 11.69, 8.27
-        long_px  = max(w, h)
-        short_px = min(w, h)
-        return round((long_px / long_in + short_px / short_in) / 2)
+    try:
+        img_pil  = Image.open(file_path)
+        dpi_info = img_pil.info.get("dpi", (72, 72))
+        if isinstance(dpi_info, (int, float)):
+            dpi_info = (dpi_info, dpi_info)
+        return int(min(float(dpi_info[0]), float(dpi_info[1])))
+    except Exception:
+        return 72
 
 
 # ════════════════════════════════════════════════════════
-# PARAMETER 6 — NOISE  ← UPDATED: Gaussian Difference Method
+# PARAMETER 6 — NOISE
 #
 # Method  : Subtract a Gaussian-blurred version from the
 #           original to isolate high-frequency grain.
@@ -160,7 +140,7 @@ def calculate_dpi(file_path, img):
 def calculate_noise(img):
     gray     = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
     blurred  = cv2.GaussianBlur(gray, (5, 5), sigmaX=1.0)
-    residual = gray - blurred                       # pure grain / noise signal
+    residual = gray - blurred
     return round(float(residual.std()), 2)
 
 
@@ -190,9 +170,9 @@ def calculate_skew_angle(img):
 # Returns % of document covered by shadow
 # ════════════════════════════════════════════════════════
 def calculate_shadow_coverage(img):
-    gray       = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(float)
-    background = cv2.GaussianBlur(gray, (51, 51), 0)
-    bg_max     = background.max()
+    gray        = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(float)
+    background  = cv2.GaussianBlur(gray, (51, 51), 0)
+    bg_max      = background.max()
     if bg_max == 0:
         return 0.0
     shadow_mask = background < (bg_max * 0.7)
@@ -208,9 +188,8 @@ def calculate_orientation(img):
     return "landscape" if w > h else "portrait"
 
 
-
 # ════════════════════════════════════════════════════════
-# PARAMETER 11 — TEXT CLARITY
+# PARAMETER 10 — TEXT CLARITY
 # 95th percentile of Sobel edge magnitude
 # Higher = sharper text/details
 # ════════════════════════════════════════════════════════
@@ -220,6 +199,103 @@ def calculate_text_clarity(img):
     edge_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
     mag    = np.sqrt(edge_x**2 + edge_y**2)
     return round(float(np.percentile(mag, 95)), 2)
+
+
+# ════════════════════════════════════════════════════════
+# PARAMETER 11 — PERSPECTIVE DISTORTION
+#
+# Method  : Homography matrix (OpenCV)
+#
+# How it works:
+#   1. Detect the 4 corners of the document in the image
+#      (the distorted trapezoid shape)
+#   2. Define where those corners SHOULD be if the document
+#      were photographed flat-on (a perfect rectangle)
+#   3. Compute the 3×3 homography matrix H that maps the
+#      distorted corners to the ideal rectangle corners
+#   4. Extract H[2,0] and H[2,1] — these two values are the
+#      PURE perspective terms. In a flat scan they are exactly 0.
+#      Any deviation from 0 is caused exclusively by camera tilt.
+#   5. Also measure shear (H[0,1] + H[1,0]) and scale asymmetry
+#      (H[0,0] vs H[1,1]) which together capture the full warp.
+#
+# Returns : distortion score 0–100
+#   0–10   = negligible  (straight-on capture)
+#   10–30  = mild angle  (usually still extractable)
+#   30–60  = moderate    (extraction may struggle)
+#   60–100 = severe      (pre-processing correction needed)
+#
+# Fallback : returns 0.0 if 4 document corners cannot be found
+#            (e.g. white doc on white background)
+# ════════════════════════════════════════════════════════
+def calculate_perspective_distortion(img):
+    gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges   = cv2.Canny(blurred, 50, 150)
+
+    contours, _ = cv2.findContours(
+        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return 0.0
+
+    # Largest contour = document boundary
+    largest = max(contours, key=cv2.contourArea)
+    peri    = cv2.arcLength(largest, True)
+    approx  = cv2.approxPolyDP(largest, 0.02 * peri, True)
+
+    # Need exactly 4 corners to compute a quad homography
+    if len(approx) != 4:
+        return 0.0
+
+    src_pts = approx.reshape(4, 2).astype(np.float32)
+
+    # Sort corners: top-left, top-right, bottom-right, bottom-left
+    s       = src_pts.sum(axis=1)
+    diff    = np.diff(src_pts, axis=1).flatten()
+    ordered = np.array([
+        src_pts[np.argmin(s)],    # top-left     (smallest x+y)
+        src_pts[np.argmin(diff)], # top-right     (smallest x-y)
+        src_pts[np.argmax(s)],    # bottom-right  (largest  x+y)
+        src_pts[np.argmax(diff)]  # bottom-left   (largest  x-y)
+    ], dtype=np.float32)
+
+    # Ideal rectangle — what the document SHOULD look like flat-on
+    w = float(max(
+        np.linalg.norm(ordered[0] - ordered[1]),  # top edge
+        np.linalg.norm(ordered[3] - ordered[2])   # bottom edge
+    ))
+    h = float(max(
+        np.linalg.norm(ordered[0] - ordered[3]),  # left edge
+        np.linalg.norm(ordered[1] - ordered[2])   # right edge
+    ))
+    if w == 0 or h == 0:
+        return 0.0
+
+    dst_pts = np.array([
+        [0, 0],
+        [w, 0],
+        [w, h],
+        [0, h]
+    ], dtype=np.float32)
+
+    # Compute homography: maps distorted quad → ideal rectangle
+    H, mask = cv2.findHomography(ordered, dst_pts, cv2.RANSAC)
+    if H is None:
+        return 0.0
+
+    # H[2,0] and H[2,1] are the pure perspective coefficients
+    perspective_term = (abs(H[2, 0]) + abs(H[2, 1])) * 1000
+
+    # Off-diagonal elements = shear/warp
+    shear_term       = abs(H[0, 1]) + abs(H[1, 0])
+
+    # Diagonal asymmetry = unequal scaling on x vs y axis
+    scale_diff_term  = abs(H[0, 0] - H[1, 1])
+
+    raw            = perspective_term + shear_term + scale_diff_term
+    distortion_pct = round(min(raw / 2.0 * 100, 100.0), 2)
+    return distortion_pct
 
 
 # ════════════════════════════════════════════════════════
@@ -250,13 +326,13 @@ def _normalize_brightness(brightness):
     elif brightness <= 248:
         return 100.0
     else:
-        return _clamp(255 - brightness, 0, 7)   # >248 quickly drops
+        return _clamp(255 - brightness, 0, 7)
 
 
 def _normalize_noise(noise):
     # Gaussian-difference noise: <2 = very clean | >20 = very noisy
     # Invert so low noise → high score
-    return _clamp(20 - noise, 0, 18)            # score = 100 at noise≤2
+    return _clamp(20 - noise, 0, 18)
 
 
 def _normalize_skew(skew):
@@ -279,42 +355,40 @@ def _normalize_clarity(clarity):
     return _clamp(clarity, 5, 200)
 
 
+def _normalize_perspective(distortion):
+    # 0 = no distortion (perfect) | 100 = severe warp
+    # Invert so low distortion → high score
+    return _clamp(100 - distortion, 0, 100)
+
+
 # ════════════════════════════════════════════════════════
-# OVERALL QUALITY SCORE  ← UPDATED: Weighted Average
-#
-# Why weights instead of penalties:
-#   • Penalties are order-dependent and can stack unfairly.
-#   • A weighted average gives a fair, normalized 0–100 score
-#     where each parameter contributes proportionally.
-#   • Weights reflect what matters most for OCR / extraction:
-#     blur and text clarity together account for 40% because
-#     a blurry or low-clarity document fails OCR regardless
-#     of how good everything else is.
+# OVERALL QUALITY SCORE — Weighted Average
 #
 # WEIGHTS (must sum to 1.0):
 #   Blur             0.20  — primary sharpness driver
-#   Text Clarity     0.20  — OCR / extraction quality
-#   Contrast         0.15  — legibility of strokes
-#   Noise            0.15  — grain hides fine details
-#   Brightness       0.10  — under/over-exposed kills reads
-#   Skew             0.10  — tilted docs confuse layout parsers
+#   Text Clarity     0.18  — OCR / extraction quality
+#   Contrast         0.13  — legibility of strokes
+#   Noise            0.13  — grain hides fine details
+#   Brightness       0.09  — under/over-exposed kills reads
+#   Skew             0.09  — tilted docs confuse layout parsers
+#   Perspective      0.08  — trapezoid warp from angled capture
 #   Shadow           0.05  — localised darkness
 #   DPI              0.05  — sensor/scan resolution
 #
 # Parameters without a numeric score (resolution, orientation)
-# are categorical — they are reported but not included in the
-# weighted calculation.
+# are categorical — reported but not included in weighted score.
 # ════════════════════════════════════════════════════════
 
 WEIGHTS = {
-    "blur":      0.20,
-    "clarity":   0.20,
-    "contrast":  0.15,
-    "noise":     0.15,
-    "brightness":0.10,
-    "skew":      0.10,
-    "shadow":    0.05,
-    "dpi":       0.05,
+    "blur":        0.20,
+    "clarity":     0.18,
+    "contrast":    0.13,
+    "noise":       0.13,
+    "brightness":  0.09,
+    "skew":        0.09,
+    "perspective": 0.08,
+    "shadow":      0.05,
+    "dpi":         0.05,
 }
 # Sanity check — weights must sum to 1.0
 assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, "Weights must sum to 1.0"
@@ -322,17 +396,18 @@ assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9, "Weights must sum to 1.0"
 
 def calculate_overall_quality(blur, contrast, brightness,
                                resolution, dpi, noise,
-                               skew, shadow, clarity):
+                               skew, shadow, clarity, perspective):
 
     components = {
-        "blur":       _normalize_blur(blur),
-        "clarity":    _normalize_clarity(clarity),
-        "contrast":   _normalize_contrast(contrast),
-        "noise":      _normalize_noise(noise),
-        "brightness": _normalize_brightness(brightness),
-        "skew":       _normalize_skew(skew),
-        "shadow":     _normalize_shadow(shadow),
-        "dpi":        _normalize_dpi(dpi),
+        "blur":        _normalize_blur(blur),
+        "clarity":     _normalize_clarity(clarity),
+        "contrast":    _normalize_contrast(contrast),
+        "noise":       _normalize_noise(noise),
+        "brightness":  _normalize_brightness(brightness),
+        "skew":        _normalize_skew(skew),
+        "perspective": _normalize_perspective(perspective),
+        "shadow":      _normalize_shadow(shadow),
+        "dpi":         _normalize_dpi(dpi),
     }
 
     score = sum(WEIGHTS[k] * v for k, v in components.items())
@@ -347,7 +422,7 @@ def calculate_overall_quality(blur, contrast, brightness,
     else:
         label = "VERY POOR"
 
-    return score, label, components   # components returned for debugging
+    return score, label, components
 
 
 # ════════════════════════════════════════════════════════
@@ -387,30 +462,31 @@ def analyze_document(file_info):
     skew        = calculate_skew_angle(img)
     shadow      = calculate_shadow_coverage(img)
     clarity     = calculate_text_clarity(img)
-
+    perspective = calculate_perspective_distortion(img)
 
     overall, label, components = calculate_overall_quality(
         blur, contrast, brightness,
         resolution, dpi, noise,
-        skew, shadow, clarity
+        skew, shadow, clarity, perspective
     )
 
     return {
-        "folder_name":           file_info["folder_name"],
-        "file_name":             file_info["file_name"],
-        "blur":                  blur,
-        "contrast":              contrast,
-        "brightness":            brightness,
-        "resolution":            resolution,
-        "dpi":                   dpi,
-        "noise":                 noise,
-        "skew_angle_deg":        skew,
-        "shadow_coverage_pct":   shadow,
-        "orientation":           orientation,
-        "text_clarity":          clarity,
-        "overall_quality_score": overall,
-        "overall_quality":       label,
-        "quality_components":    components,
+        "folder_name":                file_info["folder_name"],
+        "file_name":                  file_info["file_name"],
+        "blur":                       blur,
+        "contrast":                   contrast,
+        "brightness":                 brightness,
+        "resolution":                 resolution,
+        "dpi":                        dpi,
+        "noise":                      noise,
+        "skew_angle_deg":             skew,
+        "shadow_coverage_pct":        shadow,
+        "orientation":                orientation,
+        "text_clarity":               clarity,
+        "perspective_distortion_pct": perspective,
+        "overall_quality_score":      overall,
+        "overall_quality":            label,
+        "quality_components":         components,
     }
 
 
@@ -433,7 +509,7 @@ def print_scores(r):
     print(f"  {'Shadow Coverage':<28} {r['shadow_coverage_pct']}%{'':<9}  component: {c.get('shadow', '—'):.1f}/100")
     print(f"  {'Orientation':<28} {r['orientation']}")
     print(f"  {'Text Clarity':<28} {r['text_clarity']:<12}  component: {c.get('clarity', '—'):.1f}/100")
-
+    print(f"  {'Perspective Distortion':<28} {r['perspective_distortion_pct']}%{'':<6}  component: {c.get('perspective', '—'):.1f}/100")
     print(f"  {'─'*60}")
     print(f"  {'Overall Quality':<28} {r['overall_quality_score']}/100"
           f"  → {r['overall_quality']}")

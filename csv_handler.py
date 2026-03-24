@@ -19,6 +19,7 @@ HEADERS = [
     "shadow_coverage_pct",
     "orientation",
     "text_clarity",
+    "perspective_distortion_pct",
     "overall_quality_score",
     "overall_quality",
 ]
